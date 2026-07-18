@@ -1,118 +1,63 @@
-import * as babel from "@babel/core";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
-import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/types/workspace";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-const MODEL = "gemini-3.5-flash";
 
-// ─── Request validation ────────────────────────────────────────────────────
-// Previously the body was cast straight to a type with `as` — a malformed
-// request crashed with an unhandled 500 instead of a clean 400.
-
-const requestSchema = z.object({
-  workspaceId: z.string().nullable(),
-  userId: z.string().min(1),
-  messages: z
-    .array(
-      z.object({
-        role: z.enum(["user", "assistant"]),
-        content: z.string(),
-        imageUrl: z.string().url().optional(),
-      }),
-    )
-    .min(1),
-  fileData: z
-    .object({
-      files: z.record(z.string(), z.object({ code: z.string() })),
-      dependencies: z.record(z.string(), z.string()),
-      title: z.string().optional(),
-    })
-    .nullable(),
-});
-
-// ─── SSE helper ─────────────────────────────────────────────────────────────
+// ─── SSE helper ───────────────────────────────────────────────────────────────
 
 function sseEvent(type: string, payload: unknown): string {
-  let safePayload: Record<string, unknown>;
-  try {
-    safePayload = JSON.parse(JSON.stringify(payload)) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    safePayload = { message: "Unserializable payload" };
-  }
-  return `data: ${JSON.stringify({ type, ...safePayload })}\n\n`;
+  return `data: ${JSON.stringify({ type, ...(payload as object) })}\n\n`;
 }
 
-// ─── Generated file validator ──────────────────────────────────────
-function validateGeneratedFiles(files: Record<string, { code: string }>) {
-  for (const [path, { code }] of Object.entries(files)) {
-    try {
-      babel.parse(code, { sourceType: "module", plugins: ["jsx"] });
-    } catch (err) {
-      throw new Error(
-        `Generated file ${path} has invalid syntax: ${(err as Error).message}`,
-      );
-    }
-  }
-}
-// ─── Extract short label from a Gemini thought chunk ──────────────────────
+// ─── Extract short label from a Gemini thought chunk ─────────────────────────
+// Gemini thoughts often start with a bold heading like **Verify Config**
+// We extract that. If no bold heading, take the first sentence only.
 
 function extractThoughtLabel(text: string): string | null {
+  // Try to grab **bold heading** at the start
   const boldMatch = text.match(/\*\*([^*]{4,60})\*\*/);
   if (boldMatch) return boldMatch[1].trim();
 
+  // Fall back to first sentence (up to first . or \n), capped at 60 chars
   const sentence = text.split(/[.\n]/)[0].trim();
   if (sentence.length >= 8 && sentence.length <= 80) return sentence;
 
   return null;
 }
 
-// ─── npm validation ─────────────────────────────────────────────────────────
-// Now returns which packages were dropped so we can tell the client, instead
-// of silently shipping an app that imports a package which vanished from
-// `dependencies` with no explanation.
+// ─── npm validation ───────────────────────────────────────────────────────────
 
 async function validateDependencies(
   deps: Record<string, string>,
-): Promise<{ valid: Record<string, string>; dropped: string[] }> {
+): Promise<Record<string, string>> {
   const valid: Record<string, string> = {};
-  const dropped: string[] = [];
-
   await Promise.all(
     Object.entries(deps).map(async ([pkg, version]) => {
       try {
         const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
           signal: AbortSignal.timeout(1500),
         });
-        if (res.ok) {
-          valid[pkg] = version;
-        } else {
-          dropped.push(pkg);
-        }
+        if (res.ok) valid[pkg] = version;
       } catch {
-        dropped.push(pkg);
+        // silently skip hallucinated packages
       }
     }),
   );
-
-  return { valid, dropped };
+  return valid;
 }
 
-// ─── History trimming ───────────────────────────────────────────────────────
+// ─── History trimming ─────────────────────────────────────────────────────────
 
 function trimHistory(messages: Message[]): Message[] {
   if (messages.length <= 10) return messages;
   return [messages[0], ...messages.slice(-8)];
 }
 
-// ─── System prompt ──────────────────────────────────────────────────────────
+// ─── System prompt ────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are an expert React developer. Your job is to generate complete, working React applications based on user prompts.
 
@@ -139,7 +84,7 @@ RULES:
 9. Keep code clean, readable, and production-quality.
 10. If the user attaches an image, use it as a design reference and match the layout/style as closely as possible.`;
 
-// ─── Gemini contents builder ────────────────────────────────────────────────
+// ─── Gemini contents builder ──────────────────────────────────────────────────
 
 function buildContents(messages: Message[], fileData: FileData | null) {
   const trimmed = trimHistory(messages);
@@ -149,6 +94,7 @@ function buildContents(messages: Message[], fileData: FileData | null) {
 
     if (msg.role === "user") {
       const parts: object[] = [];
+
       let text = msg.content;
 
       if (msg.imageUrl) {
@@ -170,7 +116,7 @@ function buildContents(messages: Message[], fileData: FileData | null) {
   });
 }
 
-// ─── Route ──────────────────────────────────────────────────────────────────
+// ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   const { userId: clerkId } = await auth();
@@ -178,29 +124,49 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  const rawBody = await request.json();
-  const parsedBody = requestSchema.safeParse(rawBody);
-  if (!parsedBody.success) {
-    return Response.json(
-      { message: "Invalid request body", issues: parsedBody.error.flatten() },
-      { status: 400 },
-    );
-  }
-  const { workspaceId, userId, messages, fileData } = parsedBody.data;
+  const body = await request.json();
+  const { workspaceId, userId, messages, fileData } = body as {
+    workspaceId: string | null;
+    userId: string;
+    messages: Message[];
+    fileData: FileData | null;
+  };
 
-  // Look up by primary key (`id`), then check clerkId in application code.
-  // The previous `where: { id: userId, clerkId }` only works if the schema
-  // declares a compound unique constraint on those two columns — if `id`
-  // and `clerkId` are just two separately-unique fields, that query fails
-  // to compile against Prisma. This form works regardless of the schema.
+  if (!messages?.length) {
+    return Response.json({ message: "No messages provided" }, { status: 400 });
+  }
+
+  // ── Arcjet: rate limit, prompt injection, sensitive info ──────────────────
+  // detectPromptInjectionMessage requires the actual user text to inspect.
+
+  // const arcjetReq = new Request(request.url, {
+  //   method: request.method,
+  //   headers: request.headers,
+  //   body: JSON.stringify(body),
+  // });
+
+  // const lastUserMessage =
+  //   [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  // const decision = await aj.protect(arcjetReq, {
+  //   requested: 1,
+  //   userId: clerkId,
+  //   detectPromptInjectionMessage: lastUserMessage,
+  // });
+
+  // if (decision.isDenied()) {
+  //   return Response.json(
+  //     { message: decision.reason?.type ?? "Request blocked" },
+  //     { status: 429 }
+  //   );
+  // }
+
   const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { id: true, clerkId: true, credits: true },
+    where: { id: userId, clerkId },
+    select: { id: true, credits: true },
   });
 
-  if (!user || user.clerkId !== clerkId) {
+  if (!user)
     return Response.json({ message: "User not found" }, { status: 404 });
-  }
   if (user.credits < CREDIT_COST_PER_GENERATION) {
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
   }
@@ -213,13 +179,10 @@ export async function POST(request: NextRequest) {
         controller.enqueue(encoder.encode(chunk));
 
       try {
-        const contents = buildContents(
-          messages as Message[],
-          fileData as FileData | null,
-        );
+        const contents = buildContents(messages, fileData);
 
         const geminiStream = await ai.models.generateContentStream({
-          model: MODEL,
+          model: "gemini-3.5-flash",
           contents,
           config: {
             systemInstruction: SYSTEM_PROMPT,
@@ -231,8 +194,8 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        let accumulated = "";
-        let lastEmitTime = 0;
+        let accumulated = ""; // final JSON output
+        let lastEmitTime = 0; // throttle thought emissions
 
         for await (const chunk of geminiStream) {
           const parts = chunk.candidates?.[0]?.content?.parts ?? [];
@@ -241,6 +204,7 @@ export async function POST(request: NextRequest) {
             if (!part.text) continue;
 
             if (part.thought) {
+              // Extract just the short label — not the full wall of text
               const now = Date.now();
               if (now - lastEmitTime > 600) {
                 const label = extractThoughtLabel(part.text);
@@ -250,10 +214,13 @@ export async function POST(request: NextRequest) {
                 }
               }
             } else {
+              // Actual JSON output
               accumulated += part.text;
             }
           }
         }
+
+        // ── Parse the complete JSON response ──────────────────────────────────
 
         let parsed: {
           assistantMessage: string;
@@ -268,20 +235,6 @@ export async function POST(request: NextRequest) {
           enqueue(
             sseEvent("error", {
               message: "AI returned invalid JSON. Please try again.",
-            }),
-          );
-          controller.close();
-          return;
-        }
-        try {
-          validateGeneratedFiles(parsed.files);
-        } catch (err) {
-          enqueue(
-            sseEvent("error", {
-              message:
-                err instanceof Error
-                  ? err.message
-                  : "Generated code failed validation.",
             }),
           );
           controller.close();
@@ -305,39 +258,27 @@ export async function POST(request: NextRequest) {
           return;
         }
 
+        // ── Validate npm packages ──────────────────────────────────────────────
+
         enqueue(sseEvent("status", { message: "Validating packages…" }));
-        const { valid: validatedDeps, dropped } = await validateDependencies(
-          dependencies ?? {},
-        );
-
-        if (dropped.length > 0) {
-          enqueue(
-            sseEvent("status", {
-              message: `Skipped unavailable package${dropped.length > 1 ? "s" : ""}: ${dropped.join(", ")}`,
-            }),
-          );
-        }
-
+        const validatedDeps = await validateDependencies(dependencies ?? {});
         const newFileData: FileData = {
           files,
           dependencies: validatedDeps,
           title: aiTitle,
         };
 
+        // ── Upsert workspace + deduct credit (single transaction) ──────────────
+
         enqueue(sseEvent("status", { message: "Saving…" }));
 
         const lastUserMessage = messages[messages.length - 1];
         const updatedMessages: Message[] = [
-          ...(messages as Message[]),
+          ...messages,
           { role: "assistant", content: assistantMessage },
         ];
 
-        // Debit credits atomically as part of the same transaction that
-        // saves the workspace. `updateMany` with a `credits: { gte: cost }`
-        // guard means two concurrent requests can't both pass the earlier
-        // check and drive the balance negative — whichever commits second
-        // sees `count: 0` and the whole transaction rolls back.
-        const [workspace, debit] = await db.$transaction([
+        const [workspace] = await db.$transaction([
           workspaceId
             ? db.workspace.update({
                 where: { id: workspaceId, userId },
@@ -354,34 +295,26 @@ export async function POST(request: NextRequest) {
                   fileData: newFileData as never,
                 },
               }),
-          db.user.updateMany({
-            where: { id: userId, credits: { gte: CREDIT_COST_PER_GENERATION } },
+          db.user.update({
+            where: { id: userId },
             data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
           }),
         ]);
-
-        if (debit.count === 0) {
-          enqueue(
-            sseEvent("error", {
-              message:
-                "Ran out of credits mid-generation. Your app was not saved — please top up and try again.",
-            }),
-          );
-          controller.close();
-          return;
-        }
 
         const updatedUser = await db.user.findUnique({
           where: { id: userId },
           select: { credits: true },
         });
 
+        // ── Emit final result ──────────────────────────────────────────────────
+
         enqueue(
           sseEvent("done", {
             workspaceId: workspace.id,
             assistantMessage,
             fileData: newFileData,
-            creditsRemaining: updatedUser?.credits ?? 0,
+            creditsRemaining:
+              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
           }),
         );
       } catch (err) {
