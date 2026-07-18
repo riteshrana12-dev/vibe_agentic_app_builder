@@ -1,3 +1,4 @@
+import * as babel from "@babel/core";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { Agent, createTool } from "@cline/sdk";
@@ -16,6 +17,21 @@ function sseEvent(type: string, payload: unknown): string {
     safePayload = { message: "Unserializable payload" };
   }
   return `data: ${JSON.stringify({ type, ...safePayload })}\n\n`;
+}
+
+function validateGeneratedFiles(files: Record<string, { code: string }>): void {
+  for (const [path, { code }] of Object.entries(files)) {
+    try {
+      babel.parse(code, {
+        sourceType: "module",
+        presets: ["@babel/preset-react"], // JSX support
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unknown parse error";
+      throw new Error(`Generated file ${path} has invalid syntax: ${message}`);
+    }
+  }
 }
 
 // ─── Route ─────────────────────────────────────────────────────────────────────
@@ -145,6 +161,22 @@ export async function POST(request: NextRequest) {
           dependencies: fileData.dependencies,
           title: fileData.title,
         };
+
+        try {
+          validateGeneratedFiles(newFileData.files);
+        } catch (err) {
+          enqueue(
+            sseEvent("error", {
+              message:
+                err instanceof Error
+                  ? err.message
+                  : "Generated code failed validation.",
+            }),
+          );
+          controller.close();
+          return;
+        }
+
         await db.$transaction([
           db.workspace.update({
             where: { id: workspaceId, userId },
