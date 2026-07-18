@@ -7,16 +7,6 @@ import { db } from "@/lib/prisma";
 import type { ProjectSummary } from "@/types/project";
 export type { ProjectSummary } from "@/types/project";
 
-type WorkspaceType = {
-  id: string;
-  title: string | null;
-  userId: string;
-  messages: unknown; // Prisma `Json` maps to `Prisma.JsonValue` or `unknown`
-  fileData?: unknown;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
 // ─── Get all workspaces for the current user ──────────────────────────────────
 
 export async function getUserProjects(): Promise<ProjectSummary[]> {
@@ -41,24 +31,32 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
     orderBy: { updatedAt: "desc" },
   });
 
-  return workspaces.map((w) => {
-    const msgs = Array.isArray(w.messages) ? w.messages : [];
-    const firstUserMsg = msgs.find(
-      (m): m is { role: string; content: string } =>
-        typeof m === "object" &&
-        m !== null &&
-        (m as Record<string, unknown>).role === "user",
-    );
+  return workspaces.map(
+    (w: {
+      id: string;
+      title: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      messages: unknown;
+    }) => {
+      const msgs = Array.isArray(w.messages) ? w.messages : [];
+      const firstUserMsg = msgs.find(
+        (m): m is { role: string; content: string } =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "user",
+      );
 
-    return {
-      id: w.id,
-      title: w.title,
-      firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null,
-      createdAt: w.createdAt,
-      updatedAt: w.updatedAt,
-      messageCount: msgs.length,
-    };
-  });
+      return {
+        id: w.id,
+        title: w.title,
+        firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null,
+        createdAt: w.createdAt,
+        updatedAt: w.updatedAt,
+        messageCount: msgs.length,
+      };
+    },
+  );
 }
 
 // ─── Delete a workspace ───────────────────────────────────────────────────────
