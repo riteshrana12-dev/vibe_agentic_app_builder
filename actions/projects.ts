@@ -5,8 +5,17 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import type { ProjectSummary } from "@/types/project";
-
 export type { ProjectSummary } from "@/types/project";
+
+type WorkspaceType = {
+  id: string;
+  title: string | null;
+  userId: string;
+  messages: unknown; // Prisma `Json` maps to `Prisma.JsonValue` or `unknown`
+  fileData?: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 // ─── Get all workspaces for the current user ──────────────────────────────────
 
@@ -32,7 +41,7 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
     orderBy: { updatedAt: "desc" },
   });
 
-  return workspaces.map((w) => {
+  return workspaces.map((w: WorkspaceType) => {
     const msgs = Array.isArray(w.messages) ? w.messages : [];
     const firstUserMsg = msgs.find(
       (m): m is { role: string; content: string } =>
