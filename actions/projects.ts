@@ -41,7 +41,7 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
     orderBy: { updatedAt: "desc" },
   });
 
-  return workspaces.map((w: WorkspaceType) => {
+  return workspaces.map((w) => {
     const msgs = Array.isArray(w.messages) ? w.messages : [];
     const firstUserMsg = msgs.find(
       (m): m is { role: string; content: string } =>
@@ -53,10 +53,10 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
     return {
       id: w.id,
       title: w.title,
-      firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null, // ← new
+      firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null,
       createdAt: w.createdAt,
       updatedAt: w.updatedAt,
-      messageCount: Array.isArray(w.messages) ? w.messages.length : 0,
+      messageCount: msgs.length,
     };
   });
 }
