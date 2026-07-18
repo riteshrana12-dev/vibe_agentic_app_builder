@@ -1,3 +1,4 @@
+import * as babel from "@babel/core";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
@@ -49,6 +50,18 @@ function sseEvent(type: string, payload: unknown): string {
   return `data: ${JSON.stringify({ type, ...safePayload })}\n\n`;
 }
 
+// ─── Generated file validator ──────────────────────────────────────
+function validateGeneratedFiles(files: Record<string, { code: string }>) {
+  for (const [path, { code }] of Object.entries(files)) {
+    try {
+      babel.parse(code, { sourceType: "module", plugins: ["jsx"] });
+    } catch (err) {
+      throw new Error(
+        `Generated file ${path} has invalid syntax: ${(err as Error).message}`,
+      );
+    }
+  }
+}
 // ─── Extract short label from a Gemini thought chunk ──────────────────────
 
 function extractThoughtLabel(text: string): string | null {
@@ -255,6 +268,20 @@ export async function POST(request: NextRequest) {
           enqueue(
             sseEvent("error", {
               message: "AI returned invalid JSON. Please try again.",
+            }),
+          );
+          controller.close();
+          return;
+        }
+        try {
+          validateGeneratedFiles(parsed.files);
+        } catch (err) {
+          enqueue(
+            sseEvent("error", {
+              message:
+                err instanceof Error
+                  ? err.message
+                  : "Generated code failed validation.",
             }),
           );
           controller.close();
