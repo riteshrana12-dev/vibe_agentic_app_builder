@@ -381,8 +381,7 @@ export async function POST(request: NextRequest) {
             workspaceId: workspace.id,
             assistantMessage,
             fileData: newFileData,
-            creditsRemaining:
-              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+            creditsRemaining: updatedUser?.credits ?? 0,
           }),
         );
       } catch (err) {
