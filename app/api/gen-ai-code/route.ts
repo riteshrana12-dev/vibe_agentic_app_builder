@@ -37,7 +37,16 @@ const requestSchema = z.object({
 // ─── SSE helper ─────────────────────────────────────────────────────────────
 
 function sseEvent(type: string, payload: unknown): string {
-  return `data: ${JSON.stringify({ type, ...(payload as object) })}\n\n`;
+  let safePayload: Record<string, unknown>;
+  try {
+    safePayload = JSON.parse(JSON.stringify(payload)) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    safePayload = { message: "Unserializable payload" };
+  }
+  return `data: ${JSON.stringify({ type, ...safePayload })}\n\n`;
 }
 
 // ─── Extract short label from a Gemini thought chunk ──────────────────────
