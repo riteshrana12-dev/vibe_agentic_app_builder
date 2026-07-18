@@ -198,8 +198,7 @@ export async function POST(request: NextRequest) {
           sseEvent("done", {
             fileData: newFileData,
             summary: String(finalSummary || result.outputText || ""),
-            creditsRemaining:
-              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+            creditsRemaining: updatedUser?.credits ?? 0,
           }),
         );
       } catch (err) {
